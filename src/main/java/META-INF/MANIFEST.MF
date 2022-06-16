@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Premain-Class: org.tlsp.mc.AgentMain
+Agent-Class: org.tlsp.mc.AgentMain
+Can-Retransform-Classes: true
+Can-Redefine-Classes: true
