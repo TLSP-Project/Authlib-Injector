@@ -16,28 +16,34 @@ import com.mojang.authlib.exceptions.AuthenticationUnavailableException;
 import com.mojang.authlib.minecraft.HttpMinecraftSessionService;
 import com.mojang.authlib.minecraft.MinecraftProfileTexture;
 import com.mojang.authlib.properties.Property;
-import com.mojang.authlib.yggdrasil.YggdrasilAuthenticationService;
 import com.mojang.authlib.yggdrasil.request.JoinMinecraftServerRequest;
 import com.mojang.authlib.yggdrasil.response.HasJoinedMinecraftServerResponse;
 import com.mojang.authlib.yggdrasil.response.MinecraftProfilePropertiesResponse;
 import com.mojang.authlib.yggdrasil.response.MinecraftTexturesPayload;
 import com.mojang.authlib.yggdrasil.response.Response;
 import com.mojang.util.UUIDTypeAdapter;
+
+import java.io.IOException;
 import java.lang.reflect.Type;
 import java.net.InetAddress;
 import java.net.URL;
 import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.spec.X509EncodedKeySpec;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
 import org.apache.commons.codec.Charsets;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.tlsp.mc.utils.NetworkUtils;
+import org.tlsp.mc.wrapper.mac.MixinCallbackInfoWrapper;
+import org.tlsp.mc.wrapper.mac.ProtectedMixinMethodsWrapper;
+import org.tlsp.mc.wrapper.TLSPAgentWrapper;
 
 public class YggdrasilMinecraftSessionService
         extends HttpMinecraftSessionService {
@@ -55,6 +61,10 @@ public class YggdrasilMinecraftSessionService
         }
     });
 
+    public List<String> test(){
+        return Arrays.asList("-XX:+DisableAttachMechanism");
+    }
+
     protected YggdrasilMinecraftSessionService(YggdrasilAuthenticationService authenticationService) {
         super(authenticationService);
         try {
@@ -69,11 +79,67 @@ public class YggdrasilMinecraftSessionService
 
     @Override
     public void joinServer(GameProfile profile, String authenticationToken, String serverId) throws AuthenticationException {
+        boolean isMacServer = TLSPAgentWrapper.Instance.IsMACServer();
+        boolean isMacClient = TLSPAgentWrapper.Instance.IsMACClient();
+
+        System.err.println("Is MacServer " + isMacServer);
+        System.err.println("Is MacClient " + isMacClient);
+
+        try {
+            if (TLSPAgentWrapper.Instance.IsLoadMAC()){
+                //判断为MAC服务端
+                if (isMacServer){
+                    serverId = NetworkUtils.getTGlobalValue("serverIdHex");
+
+                    System.err.println(String.format("Repleace ServerId: %s",serverId));
+                }
+                MixinCallbackInfoWrapper callbackInfoWrapper = new MixinCallbackInfoWrapper(Thread.currentThread().getContextClassLoader(), "joinServer",true);
+                //调用MAC JoinServer处理
+                new ProtectedMixinMethodsWrapper(Thread.currentThread().getContextClassLoader()).joinServer(profile, authenticationToken, serverId, callbackInfoWrapper);
+            }else if(isMacClient){
+                NetworkUtils.putTGlobalValue("canJoinServer",null);
+
+                NetworkUtils.putTGlobalValue("profileName",profile.getName());
+                NetworkUtils.putTGlobalValue("profileUUID",profile.getId().toString());
+                NetworkUtils.putTGlobalValue("authenticationToken",authenticationToken);
+                NetworkUtils.putTGlobalValue("serverIdHex",serverId);
+                NetworkUtils.putTGlobalValue("netState","NeedEncrypt,Join");
+
+                //等待Server端反馈
+                NetworkUtils.tryGetTGlobalValue("canJoinServer",60);
+
+                //返回,由Server发送serverId验证
+                return;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.err.println(e);
+            throw new AuthenticationException(e.getMessage());
+        }
+
         JoinMinecraftServerRequest request = new JoinMinecraftServerRequest();
         request.accessToken = authenticationToken;
         request.selectedProfile = profile.getId();
         request.serverId = serverId;
-        this.getAuthenticationService().makeRequest(JOIN_URL, request, Response.class);
+
+        try{
+            Response response = this.getAuthenticationService().makeRequest(new URL(TLSPAgentWrapper.Instance.getAPIURL() + "/session/minecraft/join"), request, Response.class);
+            if(response.getCause().equals("0")){
+                if (isMacServer){
+                    NetworkUtils.putTGlobalValue("canJoinServer","true");
+                }
+                return;
+            }
+            else if (response.getCause().equals("-1")){
+                throw new IOException(response.getErrorMessage());
+            }
+        }catch (Exception e){
+            e.printStackTrace();
+            System.err.println(e);
+            throw new AuthenticationException(e.getClass().getName() + "\t " + e.getMessage());
+        }
+
+        throw new AuthenticationException("验证服务调用失败,请重试");
     }
 
     @Override
